@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       luci_version:
-        description: "选择luci版本"
+        description: "选择luci版本 (建议保持默认最新)"
         required: false
         default: "24.10.5"
         type: choice
@@ -16,23 +16,22 @@ on:
           - 24.10.4
           - 24.10.5
       custom_router_ip:
-        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        description: "路由器管理地址 (已避开光猫网段)"
         required: true
-        default: "192.168.100.1"
+        default: "10.10.10.1"
       profile:
-        description: '请输入要编译固件大小 单位(MB)'
+        description: '固件根分区大小 (MB) - PVE环境推荐1024'
         required: true
         default: '1024'
       enable_store:
-        description: "集成 store 商店"
+        description: "集成 store 商店 (纯净版选 false)"
         required: false
         type: boolean
-        default: true
+        default: false
       include_docker:
-        description: |
-          是否编译 Docker 插件
+        description: "是否编译 Docker 插件 (纯净版选 no)"
         required: true
-        default: 'yes'
+        default: 'no'
         type: choice
         options:
           - 'yes'
@@ -66,9 +65,8 @@ jobs:
       - name: Save Custom Router IP into OpenWrt files
         run: |
           mkdir -p "${{ github.workspace }}/custom"
-          echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
-          echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
+          echo "${{ inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
+          echo "✅ 后台地址已设为: ${{ inputs.custom_router_ip }}"
       
       - name: Validate PPPoE Inputs
         run: |
@@ -79,9 +77,20 @@ jobs:
             fi
           fi
       
+      - name: Inject J4125 & PVE Drivers & Argon Theme (核心满血补丁)
+        run: |
+          # 1. 强制写入 VirtIO 防丢包驱动和 AES 加密
+          echo "CONFIG_PACKAGE_kmod-virtio-net=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-virtio-blk=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-virtio-balloon=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-crypto-aesni=y" >> ${{ github.workspace }}/x86-64/imm.config
+          # 2. 将高颜值 Argon 主题和基础工具注入自定义包列表
+          echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-argon luci-app-argon-config luci-app-ttyd"' >> ${{ github.workspace }}/shell/custom-packages.sh
+          echo "✅ PVE 驱动、AES-NI 加密、Argon 主题及控制台已强制注入"
+
       - name: Enable Store integration
         run: |
-          if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
+          if [ "${{ inputs.enable_store }}" == "true" ]; then
             echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/custom-packages.sh
             echo "✅ 已追加 luci-app-store"
           else
@@ -90,9 +99,9 @@ jobs:
 
       - name: Build ImmortalWrt-x86-64-efi 24.10.x
         run: |
-          profile="${{ github.event.inputs.profile }}"
-          include_docker="${{ github.event.inputs.include_docker }}"
-          luci_version="${{ github.event.inputs.luci_version }}"
+          profile="${{ inputs.profile }}"
+          include_docker="${{ inputs.include_docker }}"
+          luci_version="${{ inputs.luci_version }}"
           echo "Building for profile: $profile"
           docker run --rm -i \
             --user root \
@@ -109,31 +118,28 @@ jobs:
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
           immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
           
-
       - name: Create info
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
-          ## 📡 路由器后台信息
-          <a href="https://wkdaily.cpolar.cn/archives/1">
-           <img src="https://img.shields.io/badge/若下载慢可套用国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge"/>
-          </a>
+          ## 🚀 J4125 PVE 满血定制版 (基于 24.10)
           
-          - 🏠 **后台地址**: ${{ github.event.inputs.custom_router_ip }}
+          - 🏠 **后台地址**: \`${{ inputs.custom_router_ip }}\`
           - 👤 **用户名**: root
           - 🔑 **密码**: 无
+          - 📦 **系统状态**: 包含 VirtIO 防丢包模块、AES-NI 加密加速、Argon 主题
           EOF
 
-          if [ "${{ github.event.inputs.include_docker }}" == "yes" ]; then
-            extra_content="#### 默认带docker"
-            echo -e "\n$extra_content" >> ${{ github.workspace }}/router-info.md
+          if [ "${{ inputs.include_docker }}" == "yes" ]; then
+            echo -e "\n#### ⚠️ 已启用 Docker (不建议纯净环境使用)" >> ${{ github.workspace }}/router-info.md
           else
-            echo -e "\n#### 不带docker" >> ${{ github.workspace }}/router-info.md
+            echo -e "\n#### ✅ 纯净无 Docker 环境" >> ${{ github.workspace }}/router-info.md
           fi
 
       - name: Upload ImmortWrt as release assets
         uses: softprops/action-gh-release@v2.2.1
         with:
-          tag_name: Autobuild-x86-64
+          tag_name: Autobuild-x86-64-24.10
+          name: "J4125 PVE 纯净版固件 (Linux 6.6 内核)"
           body_path: ${{ github.workspace }}/router-info.md
           files: |
             ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz
