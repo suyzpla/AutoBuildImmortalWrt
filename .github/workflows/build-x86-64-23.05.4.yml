@@ -4,41 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       custom_router_ip:
-        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        description: "路由器管理地址 (建议避开光猫网段)"
         required: true
-        default: "192.168.100.1"
+        default: "10.10.10.1"
       profile:
-        description: '请输入要编译固件大小 单位(MB)'
+        description: '固件根分区大小 (MB) - PVE环境建议1024'
         required: true
         default: '1024'
       enable_store:
-        description: "集成 store 商店"
+        description: "集成 iStore 商店 (纯净版选 false)"
         required: false
         type: boolean
-        default: true
+        default: false
       include_docker:
-        description: |
-          是否编译 Docker 插件
-        required: true
-        default: 'yes'
+        description: "集成 Docker (纯净版选 no)"
+        required: false
+        default: 'no'
         type: choice
         options:
           - 'yes'
           - 'no'
       enable_pppoe:
-        description: "是否配置PPPoE拨号信息?"
+        description: "是否预配置 PPPoE?"
         required: true
         default: 'no'
         type: choice
         options:
         - 'yes'
         - 'no'
-      pppoe_account:
-        description: "宽带账号 (若启用PPPoE)"
-        required: false
-      pppoe_password:
-        description: "宽带密码 (若启用PPPoE)"
-        required: false
 
 jobs:
   build:
@@ -51,87 +44,63 @@ jobs:
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build23.sh
       
-      - name: Save Custom Router IP into OpenWrt files
+      - name: Save Custom Router IP
         run: |
           mkdir -p "${{ github.workspace }}/custom"
-          echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
-          echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
-      
-      
-      - name: Validate PPPoE Inputs
+          echo "${{ inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
+          echo "✅ 后台地址已设为: ${{ inputs.custom_router_ip }}"
+
+      - name: Inject VirtIO & AES-NI (PVE J4125 满血补丁)
         run: |
-          if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
-            if [[ -z "${{ inputs.pppoe_account }}" || -z "${{ inputs.pppoe_password }}" ]]; then
-              echo "Error: PPPoE account and password must be provided when PPPoE is enabled!"
-              exit 1
-            fi
-          fi
-      
+          # 强制将 PVE 防丢包驱动和 J4125 硬件加密写入配置文件
+          echo "CONFIG_PACKAGE_kmod-virtio-net=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-virtio-blk=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-virtio-balloon=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-crypto-aesni=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "✅ PVE 虚拟化及 AES 加密驱动已强制注入"
+
       - name: Enable Store integration
         run: |
-          if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
+          if [ "${{ inputs.enable_store }}" == "true" ]; then
             echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/custom-packages.sh
-            echo "✅ 已追加 luci-app-store"
+            echo "✅ 已开启 iStore"
           else
-            echo "❎ 未启用 luci-app-store"
+            echo "❎ 已禁用 iStore"
           fi
 
       - name: Build ImmortalWrt-x86-64-efi
         run: |
-          profiles="${{ github.event.inputs.profile }}"
-          include_docker="${{ github.event.inputs.include_docker }}"
-          
-          IFS=',' read -r -a profile_array <<< "$profiles"
-          
-          for profile in "${profile_array[@]}"; do
-            echo "Building for profile: $profile"
-            
-            docker run --rm -i \
-              --user root \
-              -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-              -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
-              -v "${{ github.workspace }}/custom:/home/build/immortalwrt/files/etc/config" \
-              -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
-              -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
-              -v "${{ github.workspace }}/x86-64/build23.sh:/home/build/immortalwrt/build.sh" \
-              -e PROFILE=$profile \
-              -e INCLUDE_DOCKER=$include_docker \
-              -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
-              -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
-              -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-              immortalwrt/imagebuilder:x86-64-openwrt-23.05.4 /bin/bash /home/build/immortalwrt/build.sh
-          done
+          docker run --rm -i \
+            --user root \
+            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
+            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/files/etc/config" \
+            -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
+            -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
+            -v "${{ github.workspace }}/x86-64/build23.sh:/home/build/immortalwrt/build.sh" \
+            -e PROFILE=${{ inputs.profile }} \
+            -e INCLUDE_DOCKER=${{ inputs.include_docker }} \
+            -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
+            immortalwrt/imagebuilder:x86-64-openwrt-23.05.4 /bin/bash /home/build/immortalwrt/build.sh
 
-      - name: Create info
+      - name: Generate Release Info
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
-          ## 📡 路由器后台信息
-          <a href="https://wkdaily.cpolar.cn/archives/1">
-           <img src="https://img.shields.io/badge/若下载慢可套用国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge"/>
-          </a>
+          ## 🚀 J4125 PVE 满血定制版
           
-          - 🏠 **后台地址**: ${{ github.event.inputs.custom_router_ip }}
+          - 🏠 **后台地址**: \`${{ inputs.custom_router_ip }}\`
           - 👤 **用户名**: root
           - 🔑 **密码**: 无
+          - 📦 **驱动状态**: 包含 VirtIO 防丢包模块 & AES-NI 加密加速
+          - 🐳 **Docker状态**: 未集成
           EOF
 
-          if [ "${{ github.event.inputs.include_docker }}" == "yes" ]; then
-            extra_content="#### 默认带docker"
-            echo -e "\n$extra_content" >> ${{ github.workspace }}/router-info.md
-          else
-            echo -e "\n#### 不带docker" >> ${{ github.workspace }}/router-info.md
-          fi
-
-
-      - name: Upload ImmortWrt as release assets
+      - name: Upload Firmware to Release
         uses: softprops/action-gh-release@v2.2.1
         with:
-          tag_name: Autobuild-x86-64
+          tag_name: J4125-PVE-Pure
+          name: "J4125 PVE 纯净版固件 (0丢包优化)"
           body_path: ${{ github.workspace }}/router-info.md
           files: |
-            ${{ github.workspace }}/bin/targets/x86/64/immortalwrt-23.05.4-x86-64-generic-squashfs-combined-efi.img.gz
+            ${{ github.workspace }}/bin/targets/x86/64/*combined-efi.img.gz
           token: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
