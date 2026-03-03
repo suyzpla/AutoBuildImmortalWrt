@@ -1,4 +1,4 @@
-name: build-x86-64-immortalwrt-24.10-pure-daed
+name: build-x86-64-immortalwrt-24.10-pure-daed-v2
 
 on:
   workflow_dispatch:
@@ -40,38 +40,41 @@ jobs:
       - name: Set Permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build24.sh
 
-      - name: Prepare Config
+      - name: Prepare Config & Clean Bloat (深度清理)
         run: |
           mkdir -p "${{ github.workspace }}/custom"
           echo "${{ inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
 
-      - name: Inject Core Dependencies & Clean Bloat
-        run: |
-          # 1. J4125 物理机网卡与密码学硬件加速
+          # 1. 硬件驱动与密码学加速 (J4125 必备)
           echo "CONFIG_PACKAGE_kmod-igc=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-igb=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-r8169=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-crypto-aesni=y" >> ${{ github.workspace }}/x86-64/imm.config
           
-          # 2. daed 1.24.0 核心依赖防漏补全 (新增 XDP 与依赖)
+          # 2. daed 1.24.0 全量依赖 (XDP 极速套接字)
           echo "CONFIG_PACKAGE_kmod-bpf=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-ebpf=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-tun=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-macvlan=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-xdp-sockets=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_bpftool=y" >> ${{ github.workspace }}/x86-64/imm.config
-          
-          # 3. 基础网络工具包 (保障后续获取外部规则库不出错)
           echo "CONFIG_PACKAGE_curl=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_ca-bundle=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_ca-certificates=y" >> ${{ github.workspace }}/x86-64/imm.config
 
-          # 4. 强制编译入 daed 核心与 UI (自动匹配 ImmortalWrt 对应内核版本)
-          echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-argon luci-app-argon-config luci-app-ttyd daed luci-app-daed \
-          -luci-app-passwall -luci-app-homeproxy -luci-app-openclash -luci-app-ssr-plus -luci-app-vssr \
-          -luci-app-samba4 -luci-app-ksmbd -luci-app-vsftpd -luci-app-nfs-utils -luci-app-cifs-mount \
-          -luci-app-unblockneteasemusic -luci-app-xlnetacc -luci-app-zerotier -luci-app-upnp \
-          -coreutils -mwan3"' >> ${{ github.workspace }}/shell/custom-packages.sh
+          # 3. 拦截器：通过脚本直接重写 ImageBuilder 配置
+          # 这里我们在 custom-packages.sh 中注入一条强制执行的替换命令
+          # 这样即便默认规则里有，也会在生成镜像前被剔除
+          cat << 'EOF' > ${{ github.workspace }}/shell/custom-packages.sh
+          # A. 将我们要加的包放进去
+          CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-argon luci-app-argon-config luci-app-ttyd daed luci-app-daed"
+          
+          # B. 暴力负向剔除：覆盖所有代理和 NAS 共享包
+          CUSTOM_PACKAGES="$CUSTOM_PACKAGES -luci-app-passwall -luci-app-homeproxy -luci-app-openclash -luci-app-ssr-plus"
+          CUSTOM_PACKAGES="$CUSTOM_PACKAGES -luci-app-samba4 -luci-app-samba -samba36-server -luci-app-ksmbd -ksmbd-server"
+          CUSTOM_PACKAGES="$CUSTOM_PACKAGES -luci-app-vsftpd -luci-app-nfs-utils -luci-app-cifs-mount -automount -block-mount"
+          CUSTOM_PACKAGES="$CUSTOM_PACKAGES -luci-app-unblockneteasemusic -luci-app-zerotier -luci-app-upnp -coreutils -mwan3"
+          EOF
 
       - name: Build Firmware
         run: |
@@ -88,14 +91,14 @@ jobs:
             -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-            immortalwrt/imagebuilder:x86-64-openwrt-${{ inputs.luci_version }} /bin/bash /home/build/immortalwrt/build.sh
+            immortalwrt/imagebuilder:x86-64-openwrt-${{ inputs.luci_version }} /bin/bash -c "sed -i 's/luci-app-passwall//g; s/luci-app-homeproxy//g; s/luci-app-samba4//g' target/linux/x86/Makefile || true; /home/build/immortalwrt/build.sh"
 
       - name: Upload Artifacts
         uses: softprops/action-gh-release@v2.2.1
         with:
-          tag_name: Final-Pure-J4125
-          name: "J4125 物理机终极纯净版 (内核级适配 daed 1.24.0)"
-          body: "已剔除所有干扰项。内嵌 kmod-xdp-sockets 及完整 eBPF 栈，确保物理机直通网络极低延迟。"
+          tag_name: Final-Pure-J4125-v2
+          name: "J4125 物理机终极纯净版 v2 (完全阻断冗余包)"
+          body: "已通过 Docker 级脚本拦截彻底删除了 PassWall、HomeProxy 及 Samba/NAS 共享组件。专注提供 eBPF (daed) 及 PPPoE 拨号环境。"
           files: ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
