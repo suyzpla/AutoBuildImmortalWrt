@@ -1,4 +1,4 @@
-name: build-x86-64-immortalwrt-24.10.x
+name: build-x86-64-immortalwrt-24.10.x-baremetal
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         required: true
         default: "10.10.10.1"
       profile:
-        description: '固件根分区大小 (MB) - PVE环境推荐1024'
+        description: '固件根分区大小 (MB) - 物理机推荐1024或更大'
         required: true
         default: '1024'
       enable_store:
@@ -77,16 +77,25 @@ jobs:
             fi
           fi
       
-      - name: Inject J4125 & PVE Drivers & Argon Theme (核心满血补丁)
+      - name: Inject Physical Drivers & daed Dependencies (裸机满血补丁)
         run: |
-          # 1. 强制写入 VirtIO 防丢包驱动和 AES 加密
-          echo "CONFIG_PACKAGE_kmod-virtio-net=y" >> ${{ github.workspace }}/x86-64/imm.config
-          echo "CONFIG_PACKAGE_kmod-virtio-blk=y" >> ${{ github.workspace }}/x86-64/imm.config
-          echo "CONFIG_PACKAGE_kmod-virtio-balloon=y" >> ${{ github.workspace }}/x86-64/imm.config
+          # 1. 物理机网卡驱动与硬件加速支持 (针对 J4125 双网卡常见的 i225/i226/i210/Realtek)
+          echo "CONFIG_PACKAGE_kmod-igc=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-igb=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-r8169=y" >> ${{ github.workspace }}/x86-64/imm.config
           echo "CONFIG_PACKAGE_kmod-crypto-aesni=y" >> ${{ github.workspace }}/x86-64/imm.config
-          # 2. 将高颜值 Argon 主题和基础工具注入自定义包列表
-          echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-argon luci-app-argon-config luci-app-ttyd"' >> ${{ github.workspace }}/shell/custom-packages.sh
-          echo "✅ PVE 驱动、AES-NI 加密、Argon 主题及控制台已强制注入"
+          
+          # 2. daed 的核心 eBPF 运行依赖与网络隧道模块
+          echo "CONFIG_PACKAGE_kmod-bpf=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-ebpf=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-tun=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_kmod-macvlan=y" >> ${{ github.workspace }}/x86-64/imm.config
+          echo "CONFIG_PACKAGE_bpftool=y" >> ${{ github.workspace }}/x86-64/imm.config
+          
+          # 3. 剥离冗余插件，注入基础工具与主题
+          # 使用减号 (-) 显式剔除默认可能集成的代理插件，确保内核钩子纯净
+          echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-theme-argon luci-app-argon-config luci-app-ttyd -luci-app-openclash -luci-app-passwall -luci-app-ssr-plus"' >> ${{ github.workspace }}/shell/custom-packages.sh
+          echo "✅ 物理网卡驱动、AES-NI、eBPF 依赖已注入，冲突插件已清理"
 
       - name: Enable Store integration
         run: |
@@ -116,21 +125,21 @@ jobs:
             -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
             -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
             -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
-          immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
+            immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
           
       - name: Create info
         run: |
           cat > ${{ github.workspace }}/router-info.md <<EOF
-          ## 🚀 J4125 PVE 满血定制版 (基于 24.10)
+          ## 🚀 J4125 物理裸机 纯净满血版 (基于 24.10)
           
           - 🏠 **后台地址**: \`${{ inputs.custom_router_ip }}\`
           - 👤 **用户名**: root
           - 🔑 **密码**: 无
-          - 📦 **系统状态**: 包含 VirtIO 防丢包模块、AES-NI 加密加速、Argon 主题
+          - 📦 **系统状态**: 包含物理网卡驱动 (igc/igb)、AES-NI 加密加速、daed 运行必备 eBPF 模块，已剔除 OpenClash/Passwall 冗余。
           EOF
 
           if [ "${{ inputs.include_docker }}" == "yes" ]; then
-            echo -e "\n#### ⚠️ 已启用 Docker (不建议纯净环境使用)" >> ${{ github.workspace }}/router-info.md
+            echo -e "\n#### ⚠️ 已启用 Docker" >> ${{ github.workspace }}/router-info.md
           else
             echo -e "\n#### ✅ 纯净无 Docker 环境" >> ${{ github.workspace }}/router-info.md
           fi
@@ -138,8 +147,8 @@ jobs:
       - name: Upload ImmortWrt as release assets
         uses: softprops/action-gh-release@v2.2.1
         with:
-          tag_name: Autobuild-x86-64-24.10
-          name: "J4125 PVE 纯净版固件 (Linux 6.6 内核)"
+          tag_name: Autobuild-x86-64-24.10-BareMetal
+          name: "J4125 物理机 纯净版固件 (Linux 6.6 内核)"
           body_path: ${{ github.workspace }}/router-info.md
           files: |
             ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz
